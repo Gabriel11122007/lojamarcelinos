@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Controle de Estoque Simplificado - IndexedDB</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-gray-100 p-4">
+
+<h1 class="text-3xl font-bold mb-6 text-center">Controle de Estoque</h1>
+
+<!-- Formulário: Adicionar produto/lote -->
+<div class="bg-white shadow-md rounded p-4 mb-6">
+<h2 class="text-xl font-semibold mb-3">Adicionar Produto/Lote</h2>
+<form id="formProduto" class="grid grid-cols-1 md:grid-cols-3 gap-3">
+<input type="text" id="nome" placeholder="Nome do produto" required class="border p-2 rounded">
+<input type="text" id="validade" placeholder="DD/MM/AAAA" required class="border p-2 rounded" maxlength="10">
+<input type="number" id="quantidade" placeholder="Quantidade" required class="border p-2 rounded">
+<button type="submit" class="bg-green-600 text-white px-4 py-2 rounded col-span-1 md:col-span-3">Adicionar</button>
+</form>
+</div>
+
+<!-- Pesquisa -->
+<div class="bg-white shadow-md rounded p-4 mb-6">
+<input type="text" id="busca" placeholder="Buscar por produto..." class="w-full border p-2 rounded">
+</div>
+
+<!-- Tabela de estoque -->
+<div class="bg-white shadow-md rounded p-4 mb-6 overflow-x-auto">
+<h2 class="text-xl font-semibold mb-3">Estoque</h2>
+<table class="w-full border min-w-[500px]">
+<thead>
+<tr class="bg-gray-200 cursor-pointer">
+<th class="border p-2" data-col="nome">Produto ▲▼</th>
+<th class="border p-2" data-col="validade">Validade ▲▼</th>
+<th class="border p-2" data-col="dias">Dias para vencer ▲▼</th>
+<th class="border p-2" data-col="quantidade">Quantidade ▲▼</th>
+<th class="border p-2">Ações</th>
+</tr>
+</thead>
+<tbody id="tabelaEstoque">
+<tr><td colspan="5" class="text-center p-2">Nenhum produto cadastrado</td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- Histórico -->
+<div class="bg-white shadow-md rounded p-4 mb-6">
+<h2 class="text-xl font-semibold mb-3">Histórico de Movimentações</h2>
+<ul id="historico" class="list-disc pl-5 text-sm text-gray-700"></ul>
+</div>
+
+<!-- Gráfico -->
+<div class="bg-white shadow-md rounded p-4 mb-6">
+<h2 class="text-xl font-semibold mb-3">Gráfico de Estoque por Produto</h2>
+<canvas id="graficoEstoque" height="100"></canvas>
+</div>
+
+<script>
+let db;
+let historico = [];
+let ordemColuna = {col:null, asc:true};
+
+// Abrir IndexedDB
+const request = indexedDB.open('estoqueDB',1);
+request.onupgradeneeded = function(e){
+  db = e.target.result;
+  db.createObjectStore('produtos',{keyPath:'id', autoIncrement:true});
+};
+request.onsuccess = function(e){ db = e.target.result; carregarProdutos(); };
+request.onerror = function(e){ console.error('Erro IndexedDB',e); };
+
+// Máscara de data DD/MM/AAAA
+const inputData = document.getElementById('validade');
+inputData.addEventListener('input', e=>{
+  let v = e.target.value.replace(/\D/g,'');
+  if(v.length>2) v=v.slice(0,2)+'/'+v.slice(2);
+  if(v.length>5) v=v.slice(0,5)+'/'+v.slice(5,9);
+  e.target.value=v;
+});
+
+// Funções de data
+function parseDataBr(dataBr){
+  const [dia,mes,ano]=dataBr.split('/');
+  return new Date(ano,mes-1,dia);
+}
+function diasParaVencer(dataBr){
+  const hoje=new Date();
+  const validade=parseDataBr(dataBr);
+  const diff=Math.ceil((validade-hoje)/(1000*60*60*24));
+  return diff;
+}
+
+// Adicionar produto
+function adicionarProdutoIndexed(nome, validade, quantidade){
+  const tx = db.transaction('produtos','readwrite');
+  const store = tx.objectStore('produtos');
+  store.add({nome, validade, quantidade});
+  tx.oncomplete = () => carregarProdutos();
+  historico.unshift(`Adicionado: ${quantidade} ${nome} (validade ${validade})`);
+  atualizarHistorico();
+}
+
+// Remover lote
+function removerLoteIndexed(id){
+  const tx = db.transaction('produtos','readwrite');
+  const store = tx.objectStore('produtos');
+  store.delete(id);
+  tx.oncomplete = () => carregarProdutos();
+}
+
+// Editar lote
+function editarLoteIndexed(id){
+  const tx = db.transaction('produtos','readwrite');
+  const store = tx.objectStore('produtos');
+  const requestGet = store.get(id);
+  requestGet.onsuccess = function(e){
+    const l = e.target.result;
+    if(!l) return;
+    const novaQtd=parseInt(prompt('Nova quantidade:', l.quantidade));
+    if(isNaN(novaQtd) || novaQtd<0) return;
+    const novaVal=prompt('Nova validade (DD/MM/AAAA):', l.validade);
+    if(!novaVal) return;
+    l.quantidade=novaQtd;
+    l.validade=novaVal;
+    store.put(l);
+    tx.oncomplete = () => carregarProdutos();
+    historico.unshift(`Editado lote ${l.nome} (${l.validade})`);
+    atualizarHistorico();
+  }
+}
+
+// Carregar produtos e renderizar tabela
+function carregarProdutos(){
+  const tbody = document.getElementById('tabelaEstoque');
+  tbody.innerHTML='';
+  const tx = db.transaction('produtos','readonly');
+  const store = tx.objectStore('produtos');
+  const requestAll = store.getAll();
+  requestAll.onsuccess = function(e){
+    let rows = e.target.result;
+    const busca = document.getElementById('busca').value.toLowerCase();
+    rows = rows.filter(r => r.nome.toLowerCase().includes(busca));
+
+    if(ordemColuna.col){
+      rows.sort((a,b)=>{
+        let valA=a[ordemColuna.col], valB=b[ordemColuna.col];
+        if(ordemColuna.col==='dias'){
+          valA=diasParaVencer(a.validade);
+          valB=diasParaVencer(b.validade);
+        }
+        if(typeof valA==='string') valA=valA.toLowerCase();
+        if(typeof valB==='string') valB=valB.toLowerCase();
+        return ordemColuna.asc?(valA>valB?1:valA<valB?-1:0):(valA>valB?-1:valA<valB?1:0);
+      });
+    }
+
+    if(rows.length===0){
+      tbody.innerHTML=`<tr><td colspan="5" class="text-center p-2">Nenhum produto cadastrado</td></tr>`;
+      atualizarGrafico();
+      return;
+    }
+
+    rows.forEach(r=>{
+      const tr=document.createElement('tr');
+      const dias=diasParaVencer(r.validade);
+      let bg='';
+      if(dias<0) bg='bg-red-200';
+      else if(dias<=7) bg='bg-yellow-200';
+      tr.innerHTML=`
+        <td class="border p-2 ${bg}">${r.nome}</td>
+        <td class="border p-2 ${bg}">${r.validade}</td>
+        <td class="border p-2 ${bg}">${dias<0?'Vencido':dias}</td>
+        <td class="border p-2 ${bg}">${r.quantidade}</td>
+        <td class="border p-2 flex gap-2">
+          <button data-id="${r.id}" class="editar-lote bg-blue-500 text-white px-2 py-1 rounded">Editar</button>
+          <button data-id="${r.id}" class="remover-lote bg-red-500 text-white px-2 py-1 rounded">Remover</button>
+        </td>`;
+      tbody.appendChild(tr);
+    });
+
+    atualizarGrafico();
+  }
+}
+
+// Histórico
+function atualizarHistorico(){
+  const ul=document.getElementById('historico');
+  ul.innerHTML=historico.map(h=>`<li>${h}</li>`).join('');
+}
+
+// Gráfico
+let chart=null;
+function atualizarGrafico(){
+  const ctx=document.getElementById('graficoEstoque').getContext('2d');
+  const tx = db.transaction('produtos','readonly');
+  const store = tx.objectStore('produtos');
+  const requestAll = store.getAll();
+  requestAll.onsuccess=function(e){
+    const data=e.target.result;
+    const labels = [...new Set(data.map(d=>d.nome))];
+    const dataQtd = labels.map(l=>data.filter(d=>d.nome===l).reduce((s,d)=>s+d.quantidade,0));
+    if(chart) chart.destroy();
+    chart=new Chart(ctx,{
+      type:'bar',
+      data:{labels,datasets:[{label:'Quantidade total',data:dataQtd,backgroundColor:'rgba(59,130,246,0.7)'}]},
+      options:{responsive:true,scales:{y:{beginAtZero:true}}}
+    });
+  }
+}
+
+// Eventos
+document.getElementById('formProduto').addEventListener('submit', e=>{
+  e.preventDefault();
+  const nome = document.getElementById('nome').value.trim();
+  const validade = document.getElementById('validade').value;
+  const quantidade = parseInt(document.getElementById('quantidade').value);
+  if(!nome || !validade || !quantidade) return;
+  adicionarProdutoIndexed(nome, validade, quantidade);
+  e.target.reset();
+});
+
+document.getElementById('busca').addEventListener('input', carregarProdutos);
+
+document.getElementById('tabelaEstoque').addEventListener('click', e=>{
+  if(e.target.classList.contains('remover-lote')){
+    const id = Number(e.target.dataset.id);
+    removerLoteIndexed(id);
+  } else if(e.target.classList.contains('editar-lote')){
+    const id = Number(e.target.dataset.id);
+    editarLoteIndexed(id);
+  }
+});
+
+// Ordenar colunas
+document.querySelectorAll('th[data-col]').forEach(th=>{
+  th.addEventListener('click', ()=>{
+    const col=th.dataset.col;
+    if(ordemColuna.col===col) ordemColuna.asc=!ordemColuna.asc;
+    else {ordemColuna.col=col; ordemColuna.asc=true;}
+    carregarProdutos();
+  });
+});
+</script>
+</body>
+</html>
